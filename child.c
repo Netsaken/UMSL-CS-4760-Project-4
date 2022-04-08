@@ -79,7 +79,7 @@ int main(int argc, char *argv[])
     }
 
     //Attach shared memory
-    sharedNS = shmat(shmid_NS, NULL, 0);
+    sharedNS = (unsigned int*)shmat(shmid_NS, NULL, 0);
     if (sharedNS == (void *) -1) {
         strcpy(report, ": shmatNS");
         message = strcat(title, report);
@@ -87,7 +87,7 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    sharedSecs = shmat(shmid_Secs, NULL, 0);
+    sharedSecs = (unsigned int*)shmat(shmid_Secs, NULL, 0);
     if (sharedSecs == (void *) -1) {
         strcpy(report, ": shmatSecs");
         message = strcat(title, report);
@@ -126,6 +126,7 @@ int main(int argc, char *argv[])
     }
 
     printf("Process %i received message: %s\n", i, buf.mtext);
+    //printf("Oh yeah, and the clock is at %li:%09li\n", (long) *sharedSecs, (long) *sharedNS);
 
     /**********************************************************************************
    

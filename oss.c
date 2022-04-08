@@ -10,14 +10,15 @@
 #include <time.h>
 #include <unistd.h>
 
+#define TIME_QUANTUM 10
+#define BILLION 1000000000
+
 FILE *file;
 pid_t childPid;
 
 unsigned int *sharedNS;
 unsigned int *sharedSecs;
-int shmid_NS;
-int shmid_Secs;
-int shmid_PCT;
+int shmid_NS, shmid_Secs, shmid_PCT;
 
 struct my_msgbuf {
    long mtype;
@@ -52,12 +53,11 @@ int main(int argc, char *argv[])
     int iInc = 0;
 
     struct timespec currentTime;
-    unsigned int initialTime;
-    unsigned int initialTimeNS;
-    unsigned int elapsedTime;
-    unsigned int elapsedTimeNS;
-    const unsigned int maxTimeBetweenNewProcsNS = 1000000000;
-    const unsigned int maxTimeBetweenNewProcsSecs = 1;
+    unsigned long initialTimeNS, elapsedTimeNS;
+    unsigned int randomTimeNS = 0, randomTimeSecs = 0;
+
+    const unsigned int maxTimeBetweenNewProcsNS = 500000000;
+    const unsigned int maxTimeBetweenNewProcsSecs = 3;
     const int maxProcs = 50;
     const unsigned int maxTime = 3;
     //There should also be a constant representing the percentage of time a process is launched as a normal user process or a real-time one
@@ -127,16 +127,6 @@ int main(int argc, char *argv[])
 
     *********************************************************************************/
 
-    //START THE CLOCK (TEST)
-    clock_gettime(CLOCK_MONOTONIC, &currentTime);
-    initialTime = currentTime.tv_sec;
-    initialTimeNS = currentTime.tv_nsec;
-    sleep(1);
-    clock_gettime(CLOCK_MONOTONIC, &currentTime);
-    elapsedTime = currentTime.tv_sec - initialTime;
-    elapsedTimeNS = currentTime.tv_nsec - initialTimeNS;
-    printf("Elapsed time... %i.%09i\n", elapsedTime, elapsedTimeNS);
-
     //Get message queue
     if ((msqid = msgget(keyMsg, 0666 | IPC_CREAT)) == -1) {
         strcpy(report, ": msgget");
@@ -145,25 +135,58 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    //Make message
-    char* msgToSnd = "Johnson Bagels";
-    buf.mtype = 1;
-    strcpy(buf.mtext, msgToSnd);
-
-    //Send message
-    if (msgsnd(msqid, &buf, strlen(buf.mtext)+1, 0) == -1) {
-        strcpy(report, ": msgsnd");
-        message = strcat(title, report);
-        perror(message);
-        return 1;
-    }
-
     /*************
     
-    Generate new process by allocating and initializing a PCB
+    Generate new processes by allocating and initializing a PCB (at random intervals)
 
     **************/
+   
     while (iInc < 5) {
+        //Reset elapsed time
+        elapsedTimeNS = 0;
+
+        //Choose a random interval
+        randomTimeSecs = rand() % (maxTimeBetweenNewProcsSecs + 1);
+        randomTimeNS = rand() % maxTimeBetweenNewProcsNS;
+
+        //* START THE CL0CK */ Count time until interval
+        clock_gettime(CLOCK_MONOTONIC, &currentTime);
+        initialTimeNS = (currentTime.tv_sec * BILLION) + currentTime.tv_nsec;
+
+        while (((randomTimeSecs * BILLION) + (randomTimeNS)) > elapsedTimeNS) {
+            clock_gettime(CLOCK_MONOTONIC, &currentTime);
+            //Use the full time, all converted to nanoseconds
+            elapsedTimeNS = ((currentTime.tv_sec * BILLION) + currentTime.tv_nsec) - initialTimeNS;
+        }
+
+        //Add time to the clock (and handle overflow)
+        if ((*sharedNS + elapsedTimeNS) > BILLION) {
+            *sharedNS += elapsedTimeNS;
+            while (*sharedNS > BILLION) {
+                *sharedSecs += 1;
+                *sharedNS -= BILLION;
+            }
+        } else {
+            *sharedNS += elapsedTimeNS;
+        }
+        
+        //printf("ELAPSED TIME WAS... %li.%09li\n", elapsedTimeNS / BILLION, elapsedTimeNS / 10);
+        printf("OSS creating new process at clock time %li.%09li\n", (long) *sharedSecs, (long) *sharedNS);
+
+        //Make message
+        char *msgToSnd = "Johnson Bagels";
+        buf.mtype = 1;
+        strcpy(buf.mtext, msgToSnd);
+
+        //Send message
+        if (msgsnd(msqid, &buf, strlen(buf.mtext) + 1, 0) == -1) {
+            strcpy(report, ": msgsnd");
+            message = strcat(title, report);
+            perror(message);
+            return 1;
+        }
+
+        //Create the user process
         childPid = fork();
         if (childPid == -1) {
             strcpy(report, ": childPid");
@@ -172,13 +195,13 @@ int main(int argc, char *argv[])
             return 1;
         }
 
-        // Allocate block and execute process
+        //Allocate block and execute process
         if (childPid == 0) {
             sprintf(iNum, "%i", iInc);
             procCtl->blocksInUse[iInc] = 1;
             execl("./child", iNum, NULL);
         } else {
-            //Increment process number
+            // Increment process number
             iInc++;
             // Wait for child to finish
             // do {
@@ -192,8 +215,8 @@ int main(int argc, char *argv[])
         }
     }
 
-    sleep(1);
-    //End children
+    sleep(maxTime);
+    //Shutdown
     kill(childPid, SIGTERM);
     waitpid(childPid, &status, 0);
 
