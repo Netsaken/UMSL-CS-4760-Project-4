@@ -19,7 +19,6 @@ struct PCB {
     unsigned int lastTimeUsed;
     //Pid to be set with "getpid();"
     pid_t thisPid;
-    //Priority to be set with "getpriority(PRIO_PROCESS, 0);"
     int priority;
 };
 
@@ -33,9 +32,7 @@ int main(int argc, char *argv[])
     struct my_msgbuf buf;
     unsigned int *sharedNS;
     unsigned int *sharedSecs;
-    int shmid_NS;
-    int shmid_Secs;
-    int shmid_PCT;
+    int shmid_NS, shmid_Secs, shmid_PCT;
 
     int msqid;
     int i = atoi(argv[0]);
@@ -118,7 +115,7 @@ int main(int argc, char *argv[])
     }
 
     //Receive messages
-    if (msgrcv(msqid, &buf, sizeof(buf.mtext), 0, 0) == -1) {
+    if (msgrcv(msqid, &buf, sizeof(buf.mtext), i + 1, 0) == -1) {
         strcpy(report, ": C-msgrcv");
         message = strcat(title, report);
         perror(message);
@@ -127,6 +124,19 @@ int main(int argc, char *argv[])
 
     printf("Process %i received message: %s\n", i, buf.mtext);
     //printf("Oh yeah, and the clock is at %li:%09li\n", (long) *sharedSecs, (long) *sharedNS);
+
+    //Make message
+    char *msgToSnd = "Job Complete";
+    buf.mtype = 33;
+    strcpy(buf.mtext, msgToSnd);
+
+    //Send message
+    if (msgsnd(msqid, &buf, strlen(buf.mtext) + 1, 0) == -1) {
+        strcpy(report, ": msgsnd");
+        message = strcat(title, report);
+        perror(message);
+        return 1;
+    }
 
     /**********************************************************************************
    

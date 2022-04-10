@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,10 +11,10 @@
 #include <time.h>
 #include <unistd.h>
 
-#define TIME_QUANTUM 10
-#define BILLION 1000000000
+#define QUANTUM 10000000 //10 milliseconds in nanoseconds
 
-FILE *file;
+#define BILLION 1000000000UL //1 second in nanoseconds
+
 pid_t childPid;
 
 unsigned int *sharedNS;
@@ -28,10 +29,9 @@ struct my_msgbuf {
 struct PCB {
     unsigned int totalCPUTimeUsed;
     unsigned int totalTimeInSystem;
-    unsigned int lastTimeUsed;
+    unsigned int lastBurstTime;
     //Pid to be set with "getpid();"
     pid_t thisPid;
-    //Priority to be set with "getpriority(PRIO_PROCESS, 0);"
     int priority;
 };
 
@@ -42,6 +42,7 @@ struct PCT {
 
 int main(int argc, char *argv[])
 {
+    FILE *file;
     struct my_msgbuf buf;
     int msqid, status;
 
@@ -55,13 +56,16 @@ int main(int argc, char *argv[])
     struct timespec currentTime;
     unsigned long initialTimeNS, elapsedTimeNS;
     unsigned int randomTimeNS = 0, randomTimeSecs = 0;
+    int initSwitch = 1;
+    int scheduleSwitch = 0;
 
     const unsigned int maxTimeBetweenNewProcsNS = 500000000;
-    const unsigned int maxTimeBetweenNewProcsSecs = 3;
+    const unsigned int maxTimeBetweenNewProcsSecs = 0;
     const int maxProcs = 50;
-    const unsigned int maxTime = 3;
+    const unsigned long maxTime = 3 * BILLION;
     //There should also be a constant representing the percentage of time a process is launched as a normal user process or a real-time one
     //and it should be weighted in favor of user processes
+    //Should also keep track of total lines in the log file
 
     //Initialize Process Control Table
     struct PCT *procCtl;
@@ -121,6 +125,10 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    //Reset system clock
+    *sharedSecs = 0;
+    *sharedNS = 0;
+
     /********************************************************************************
 
     Start doing things here
@@ -137,85 +145,102 @@ int main(int argc, char *argv[])
 
     /*************
     
-    Generate new processes by allocating and initializing a PCB (at random intervals)
+    Generate new processes at random intervals
 
     **************/
-   
-    while (iInc < 5) {
-        //Reset elapsed time
-        elapsedTimeNS = 0;
-
-        //Choose a random interval
-        randomTimeSecs = rand() % (maxTimeBetweenNewProcsSecs + 1);
-        randomTimeNS = rand() % maxTimeBetweenNewProcsNS;
-
-        //* START THE CL0CK */ Count time until interval
-        clock_gettime(CLOCK_MONOTONIC, &currentTime);
-        initialTimeNS = (currentTime.tv_sec * BILLION) + currentTime.tv_nsec;
-
-        while (((randomTimeSecs * BILLION) + (randomTimeNS)) > elapsedTimeNS) {
-            clock_gettime(CLOCK_MONOTONIC, &currentTime);
-            //Use the full time, all converted to nanoseconds
-            elapsedTimeNS = ((currentTime.tv_sec * BILLION) + currentTime.tv_nsec) - initialTimeNS;
+    while (((*sharedSecs * BILLION) + *sharedNS) < maxTime && iInc < 18)
+    {
+        //Check for processes in queue
+        for (int p = 0; p < 18; p++) {
+            if (procCtl->blocksInUse[p] > 0) {
+                scheduleSwitch = 1;
+            }
         }
 
-        //Add time to the clock (and handle overflow)
-        if ((*sharedNS + elapsedTimeNS) > BILLION) {
-            *sharedNS += elapsedTimeNS;
-            while (*sharedNS > BILLION) {
-                *sharedSecs += 1;
-                *sharedNS -= BILLION;
+        /* START THE CL0CK */
+        //Get the random time interval (only if it is not already set)
+        if (initSwitch == 1) {
+            randomTimeSecs = rand() % (maxTimeBetweenNewProcsSecs + 1);
+            randomTimeNS = rand() % maxTimeBetweenNewProcsNS;
+
+            clock_gettime(CLOCK_MONOTONIC, &currentTime);
+            initialTimeNS = (currentTime.tv_sec * BILLION) + currentTime.tv_nsec;
+
+            initSwitch = 0;
+        }
+
+        //Count the time
+        clock_gettime(CLOCK_MONOTONIC, &currentTime);
+        elapsedTimeNS = ((currentTime.tv_sec * BILLION) + currentTime.tv_nsec) - initialTimeNS;
+
+        //If the clock has hit the appropriate time, make a new process
+        if (((randomTimeSecs * BILLION) + (randomTimeNS)) < elapsedTimeNS) {
+            // Add time to the clock
+            if ((*sharedNS + elapsedTimeNS) > BILLION) {
+                *sharedNS += elapsedTimeNS;
+                while (*sharedNS > BILLION) {
+                    *sharedSecs += 1;
+                    *sharedNS -= BILLION;
+                }
+            } else {
+                *sharedNS += elapsedTimeNS;
+            }
+
+            //printf("ELAPSED TIME WAS... %li.%09li\n", elapsedTimeNS / BILLION, elapsedTimeNS);
+            printf("OSS creating new process at clock time %li:%09li\n", (long)*sharedSecs, (long)*sharedNS);
+            
+            //Reset elapsed time and initial time
+            elapsedTimeNS = 0;
+            initSwitch = 1;
+
+            //Make message
+            char msgToSnd[300];
+            sprintf(msgToSnd,"Johnson Bagels %i\n", iInc);
+            buf.mtype = iInc + 1;
+            strcpy(buf.mtext, msgToSnd);
+
+            //Send message
+            if (msgsnd(msqid, &buf, strlen(buf.mtext) + 1, 0) == -1) {
+                strcpy(report, ": msgsnd");
+                message = strcat(title, report);
+                perror(message);
+                return 1;
+            }
+
+            //Create the user process
+            childPid = fork();
+            if (childPid == -1) {
+                strcpy(report, ": childPid");
+                message = strcat(title, report);
+                perror(message);
+                return 1;
+            }
+
+            //Allocate block and execute process
+            if (childPid == 0) {
+                sprintf(iNum, "%i", iInc);
+                procCtl->blocksInUse[iInc] = 1;
+                execl("./child", iNum, NULL);
+            } else {
+                //Increment process number
+                iInc++;
+            }
+        }
+
+        //Receive message that child finished
+        if (msgrcv(msqid, &buf, sizeof(buf.mtext), 33, IPC_NOWAIT) == -1)
+        {
+            if (errno != ENOMSG) {   
+                strcpy(report, ": C-msgrcv");
+                message = strcat(title, report);
+                perror(message);
+                return 1;
             }
         } else {
-            *sharedNS += elapsedTimeNS;
-        }
-        
-        //printf("ELAPSED TIME WAS... %li.%09li\n", elapsedTimeNS / BILLION, elapsedTimeNS / 10);
-        printf("OSS creating new process at clock time %li.%09li\n", (long) *sharedSecs, (long) *sharedNS);
-
-        //Make message
-        char *msgToSnd = "Johnson Bagels";
-        buf.mtype = 1;
-        strcpy(buf.mtext, msgToSnd);
-
-        //Send message
-        if (msgsnd(msqid, &buf, strlen(buf.mtext) + 1, 0) == -1) {
-            strcpy(report, ": msgsnd");
-            message = strcat(title, report);
-            perror(message);
-            return 1;
-        }
-
-        //Create the user process
-        childPid = fork();
-        if (childPid == -1) {
-            strcpy(report, ": childPid");
-            message = strcat(title, report);
-            perror(message);
-            return 1;
-        }
-
-        //Allocate block and execute process
-        if (childPid == 0) {
-            sprintf(iNum, "%i", iInc);
-            procCtl->blocksInUse[iInc] = 1;
-            execl("./child", iNum, NULL);
-        } else {
-            // Increment process number
-            iInc++;
-            // Wait for child to finish
-            // do {
-            //     if ((childPid = waitpid(childPid, &status, WNOHANG)) == -1) {
-            //         strcpy(report, ": waitPid");
-            //         message = strcat(title, report);
-            //         perror(message);
-            //         return 1;
-            //     }
-            // } while (childPid == 0);
+            printf("OSS received message: %s\n", buf.mtext);
         }
     }
 
-    sleep(maxTime);
     //Shutdown
     kill(childPid, SIGTERM);
     waitpid(childPid, &status, 0);
