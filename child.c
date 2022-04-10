@@ -126,7 +126,8 @@ int main(int argc, char *argv[])
     //printf("Oh yeah, and the clock is at %li:%09li\n", (long) *sharedSecs, (long) *sharedNS);
 
     //Make message
-    char *msgToSnd = "Job Complete";
+    char msgToSnd[3];
+    sprintf(msgToSnd,"%i", i);
     buf.mtype = 33;
     strcpy(buf.mtext, msgToSnd);
 

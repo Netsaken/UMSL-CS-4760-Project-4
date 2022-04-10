@@ -20,6 +20,7 @@ pid_t childPid;
 unsigned int *sharedNS;
 unsigned int *sharedSecs;
 int shmid_NS, shmid_Secs, shmid_PCT;
+int queueSize = 0;
 
 struct my_msgbuf {
    long mtype;
@@ -40,6 +41,38 @@ struct PCT {
     int blocksInUse[18];
 };
 
+struct MLFQ {
+    int RRQ[18];
+};
+
+void queueAdd(int p, int* q) {
+    if (queueSize < 18) {
+        for (int i = 0; i < 18; i++) {
+            if (q[i] == 0) {
+                q[i] = p;
+                break;
+            }
+        }
+        queueSize++;
+    } else {
+        printf("queueAdd invoked at max size!");
+    }
+}
+
+void queueRemove(int p, int* q) {
+    if (queueSize > 0) {
+        for (int i = 18; i > 0; i--) {
+            if (q[i] == p) {
+                q[i] = 0;
+                break;
+            }
+        }
+        queueSize--;
+    } else {
+        printf("queueRemove invoked at minimum size!");
+    }
+}
+
 int main(int argc, char *argv[])
 {
     FILE *file;
@@ -59,7 +92,7 @@ int main(int argc, char *argv[])
     int initSwitch = 1;
     int scheduleSwitch = 0;
 
-    const unsigned int maxTimeBetweenNewProcsNS = 500000000;
+    const unsigned int maxTimeBetweenNewProcsNS = 300000000;
     const unsigned int maxTimeBetweenNewProcsSecs = 0;
     const int maxProcs = 50;
     const unsigned long maxTime = 3 * BILLION;
@@ -67,8 +100,9 @@ int main(int argc, char *argv[])
     //and it should be weighted in favor of user processes
     //Should also keep track of total lines in the log file
 
-    //Initialize Process Control Table
-    struct PCT *procCtl;
+    //Initialize Process Control Table and Multi-Level Feedback Queue
+    struct PCT *procCtl = {0};
+    struct MLFQ queue = {0};
 
     //Format "perror"
     char* title = argv[0];
@@ -143,6 +177,18 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    /*--d-ie0i-09eiodqiiopqmoemdpoeqdmdjn91j0-0j4
+    Steps for ROUND ROBIN
+    - Add process 1 to the queue
+    - Run process 1 for given quantum
+    - Once the quantum ends, go to the next process, if there is one
+        - How do you PAUSE a process after it has used its time quantum???
+            - ??? (send a message? But then how will it receive it? Maybe there's a Signal I can use?)
+    - If the process didn't finish by the time the quantum was used up, re-add it to the end of the queue
+        - How do I know whether the process finished successfully or not?
+            - Message send-back?
+    dij1d9j8&%*($&)#*&)3o1idnjondkni(*&@)(%%hUjfnw*/
+
     /*************
     
     Generate new processes at random intervals
@@ -175,7 +221,7 @@ int main(int argc, char *argv[])
 
         //If the clock has hit the appropriate time, make a new process
         if (((randomTimeSecs * BILLION) + (randomTimeNS)) < elapsedTimeNS) {
-            // Add time to the clock
+            //Add time to the clock
             if ((*sharedNS + elapsedTimeNS) > BILLION) {
                 *sharedNS += elapsedTimeNS;
                 while (*sharedNS > BILLION) {
@@ -195,7 +241,7 @@ int main(int argc, char *argv[])
 
             //Make message
             char msgToSnd[300];
-            sprintf(msgToSnd,"Johnson Bagels %i\n", iInc);
+            sprintf(msgToSnd,"Johnson's %i Bagels", iInc);
             buf.mtype = iInc + 1;
             strcpy(buf.mtext, msgToSnd);
 
@@ -216,12 +262,15 @@ int main(int argc, char *argv[])
                 return 1;
             }
 
-            //Allocate block and execute process
+            //Allocate block, add to queue, and execute process
             if (childPid == 0) {
-                sprintf(iNum, "%i", iInc);
+                sprintf(iNum, "%i", iInc + 1);
                 procCtl->blocksInUse[iInc] = 1;
                 execl("./child", iNum, NULL);
             } else {
+                //Add to queue
+                queueAdd(iInc + 1, queue.RRQ);
+
                 //Increment process number
                 iInc++;
             }
@@ -238,8 +287,19 @@ int main(int argc, char *argv[])
             }
         } else {
             printf("OSS received message: %s\n", buf.mtext);
+
+            //Remove from queue
+            queueRemove(atoi(buf.mtext), queue.RRQ);
+            //iInc--;
         }
     }
+
+    printf("\n");
+    printf("Values in RRQ:\n");
+    for (int z = 0; z < 18; z++) {
+        printf("%i ", queue.RRQ[z]);
+    }
+    printf("\n");
 
     //Shutdown
     kill(childPid, SIGTERM);
