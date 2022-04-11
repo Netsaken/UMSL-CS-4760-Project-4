@@ -122,12 +122,12 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    printf("Process %i received message: %s\n", i, buf.mtext);
+    printf("Process %i received message: %s\n", i + 1, buf.mtext);
     //printf("Oh yeah, and the clock is at %li:%09li\n", (long) *sharedSecs, (long) *sharedNS);
 
     //Make message
     char msgToSnd[3];
-    sprintf(msgToSnd,"%i", i);
+    sprintf(msgToSnd,"%i", i + 1);
     buf.mtype = 33;
     strcpy(buf.mtext, msgToSnd);
 
