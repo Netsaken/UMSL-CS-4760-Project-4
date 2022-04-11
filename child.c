@@ -1,3 +1,4 @@
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,6 +21,7 @@ struct PCB {
     //Pid to be set with "getpid();"
     pid_t thisPid;
     int priority;
+    int iValue;
 };
 
 struct PCT {
@@ -100,12 +102,6 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    /********************************************************************************
-
-    Start doing things here
-
-    *********************************************************************************/
-
     //Get message queue
     if ((msqid = msgget(keyMsg, 0666 | IPC_CREAT)) == -1) {
         strcpy(report, ": C-msgget");
@@ -113,6 +109,19 @@ int main(int argc, char *argv[])
         perror(message);
         return 1;
     }
+
+    /********************************************************************************
+
+    Start doing things here
+
+    *********************************************************************************/
+
+    //Set PID in PCB
+    procCtl->ctrlTbl[i].thisPid = getpid();
+    procCtl->ctrlTbl[i].iValue = i + 1;
+
+    //Stop self until OSS schedules you to run
+    raise(SIGSTOP);
 
     //Receive messages
     if (msgrcv(msqid, &buf, sizeof(buf.mtext), i + 1, 0) == -1) {
@@ -123,6 +132,7 @@ int main(int argc, char *argv[])
     }
 
     printf("Process %i received message: %s\n", i + 1, buf.mtext);
+    //printf("Process %i received message: %s\n", getpid(), buf.mtext);
     //printf("Oh yeah, and the clock is at %li:%09li\n", (long) *sharedSecs, (long) *sharedNS);
 
     //Make message

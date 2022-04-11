@@ -12,7 +12,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define QUANTUM 20000000 //20 milliseconds in nanoseconds
+#define QUANTUM 10000000 //10 milliseconds in nanoseconds
 
 #define BILLION 1000000000UL //1 second in nanoseconds
 
@@ -93,6 +93,7 @@ struct PCB {
     //Pid to be set with "getpid();"
     pid_t thisPid;
     int priority;
+    int iValue;
 };
 
 struct PCT {
@@ -114,19 +115,21 @@ void queueAdd(int p, struct MLFQ *q) {
             }
         }
         queueSize++;
+        //printf("Check...1\n");
     } else {
         printf("queueAdd invoked at max size!");
     }
 }
 
 //Remove from the front of the queue, then shift all values 1 space to the left
-void queueRemove(int p, struct MLFQ *q) {
+void queueRemove(struct MLFQ *q) {
     if (queueSize > 0) {
         for (int i = 0; i < 17; i++) {
             q->RRQ[i] = q->RRQ[i + 1];
         }
         q->RRQ[17] = 0;
         queueSize--;
+        //printf("Check...2\n");
     } else {
         printf("queueRemove invoked at minimum size!");
     }
@@ -151,9 +154,9 @@ int main(int argc, char *argv[])
     unsigned long initialTimeNS, elapsedTimeNS, initialQuantumTimeNS, elapsedQuantumTimeNS;
     unsigned int randomTimeNS = 0, randomTimeSecs = 0;
     int initSwitch = 1, initSwitchQuantum = 1;
-    int scheduleSwitch = 0;
+    int iStore, scheduleSwitch = 0;
 
-    const unsigned int maxTimeBetweenNewProcsNS = 500000000;
+    const unsigned int maxTimeBetweenNewProcsNS = 300000000;
     const unsigned int maxTimeBetweenNewProcsSecs = 0;
     const int maxProcs = 50;
     const unsigned long maxTime = 3 * BILLION;
@@ -248,10 +251,9 @@ int main(int argc, char *argv[])
     Steps for ROUND ROBIN
     - Run process 1 for given quantum
     - Once the quantum ends, go to the next process, if there is one
-        - How do you PAUSE a process after it has used its time quantum???
-            - ??? (send a separate message I guess)
     - If the process didn't finish by the time the quantum was used up, re-add it to the end of the queue
     dij1d9j8&%*($&)#*&)3o1idnjondkni(*&@)(%%hUjfnw*/
+    
     //Run program until maximum time is reached, and wait for the child processes to finish
     while ((((*sharedSecs * BILLION) + *sharedNS) < maxTime && iInc < 18) || scheduleSwitch == 1)
     {
@@ -295,6 +297,7 @@ int main(int argc, char *argv[])
             }
 
             //printf("ELAPSED TIME WAS... %li.%09li\n", elapsedTimeNS / BILLION, elapsedTimeNS);
+            //Print status to file
             printf("OSS creating new process at clock time %li:%09li\n", (long)*sharedSecs, (long)*sharedNS);
             
             //Reset elapsed time and initial time
@@ -318,7 +321,7 @@ int main(int argc, char *argv[])
                 //Add to queue
                 queueAdd(iInc + 1, &queue);
                 
-                //Allocate block
+                //Specify block in use
                 //printf("ALLOCATING BLOCKSINUSE: %i\n", iInc + 1);
                 procCtl->blocksInUse[iInc] = 1;
                 
@@ -355,13 +358,31 @@ int main(int argc, char *argv[])
                 *sharedNS += elapsedTimeNS;
             }
 
+            //Stop current process so we can run the next one
+            // printf("PID: %i\n", procCtl->ctrlTbl[queue.RRQ[0] - 1].thisPid);
+            //printf("iValue is: %i\n", procCtl->ctrlTbl[queue.RRQ[0] - 1].iValue);
+            if (procCtl->ctrlTbl[queue.RRQ[0] - 1].thisPid != 0) {
+                kill(procCtl->ctrlTbl[queue.RRQ[0] - 1].thisPid, SIGSTOP);
+                iStore = procCtl->ctrlTbl[queue.RRQ[0] - 1].iValue;
+                printf("Value of iStore: %i\n", iStore);
+                queueRemove(&queue);
+                queueAdd(iStore, &queue);
+            }
+
             //printf("ELAPSED Quantum TIME WAS... %li.%09li\n", elapsedQuantumTimeNS / BILLION, elapsedQuantumTimeNS);
             // printf("Values in RRQ (before process run): \n");
             // for (int f = 0; f < 18; f++) {
             //     printf("%i ", queue.RRQ[f]);
             // }
             // printf("\n");
+            //Print status to file
             printf("OSS running process %i at clock time %li:%09li\n", queue.RRQ[0], (long)*sharedSecs, (long)*sharedNS);
+
+            //printf("The PID I'm trying to access is: %i\n", procCtl->ctrlTbl[queue.RRQ[0] - 1].thisPid);
+            if (procCtl->ctrlTbl[queue.RRQ[0] - 1].thisPid != 0) {
+                //printf("SIGCONT RAN. PID = %i\n", procCtl->ctrlTbl[queue.RRQ[0] - 1].thisPid);
+                kill(procCtl->ctrlTbl[queue.RRQ[0] - 1].thisPid, SIGCONT);
+            }
 
             //Make message
             char msgToSnd[300];
@@ -390,10 +411,11 @@ int main(int argc, char *argv[])
                 abort();
             }
         } else {
+            //Print status to file
             printf("OSS received message: %s\n", buf.mtext);
 
             //Remove from queue
-            queueRemove(atoi(buf.mtext), &queue);
+            queueRemove(&queue);
 
             //Deallocate blocksinuse
             //printf("DEALLOCATING BLOCKSINUSE: %i\n", atoi(buf.mtext));
