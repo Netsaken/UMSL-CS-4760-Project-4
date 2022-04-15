@@ -9,6 +9,15 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#define QUANTUM 10000000
+#define BILLION 1000000000UL //1 second in nanoseconds
+#define CHANCE_TO_TERMINATE 20
+#define BLOCK_CHANCE 5
+
+unsigned int *sharedNS;
+unsigned int *sharedSecs;
+struct PCT *procCtl = {0};
+
 struct my_msgbuf {
    long mtype;
    char mtext[300];
@@ -29,12 +38,47 @@ struct PCT {
     int blocksInUse[18];
 };
 
+void endProcess(struct my_msgbuf buf, int msqid, int i) {
+    //Make message
+    char msgToSnd[3];
+    sprintf(msgToSnd,"%i", i + 1);
+    buf.mtype = 33;
+    strcpy(buf.mtext, msgToSnd);
+
+    //Send message
+    if (msgsnd(msqid, &buf, strlen(buf.mtext) + 1, 0) == -1) {
+        perror("./child: endMsg");
+        exit(1);
+    }
+
+    //Detach shared memory
+    if (shmdt(sharedNS) == -1) {
+        perror("./child: endShmdtNS");
+        exit(1);
+    }
+
+    if (shmdt(sharedSecs) == -1) {
+        perror("./child: endShmdtSecs");
+        exit(1);
+    }
+
+    if (shmdt(procCtl) == -1) {
+        perror("./child: endShmdtPCT");
+        exit(1);
+    }
+
+    exit(0);
+}
+
 int main(int argc, char *argv[])
 {
+    int terminateCheck = 0, blockedCheck = 0;
+
     struct my_msgbuf buf;
-    unsigned int *sharedNS;
-    unsigned int *sharedSecs;
     int shmid_NS, shmid_Secs, shmid_PCT;
+    unsigned int initialSharedSecs, initialSharedNS, interTImeNS, r, s;
+    unsigned long blockTimerEnd = 0, blockTimerNS = 0;
+    float p;
 
     int msqid;
     int i = atoi(argv[0]);
@@ -48,9 +92,6 @@ int main(int argc, char *argv[])
     char* title = argv[0];
     char report[30] = ": shm";
     char* message;
-
-    //Get Process Control Table
-    struct PCT *procCtl;
 
     //Get shared memory
     shmid_NS = shmget(keyNS, sizeof(sharedNS), IPC_CREAT | 0666);
@@ -120,33 +161,116 @@ int main(int argc, char *argv[])
     procCtl->ctrlTbl[i].thisPid = getpid();
     procCtl->ctrlTbl[i].iValue = i + 1;
 
-    //Stop self until OSS schedules you to run
-    raise(SIGSTOP);
+    //Get current shared time
+    initialSharedSecs = *sharedSecs;
+    initialSharedNS = *sharedNS;
 
-    //Receive messages
-    if (msgrcv(msqid, &buf, sizeof(buf.mtext), i + 1, 0) == -1) {
-        strcpy(report, ": C-msgrcv");
-        message = strcat(title, report);
-        perror(message);
-        return 1;
-    }
+    //Initialize RNG
+    srand((getpid() * 3) % 50);
 
-    printf("Process %i received message: %s\n", i + 1, buf.mtext);
-    //printf("Process %i received message: %s\n", getpid(), buf.mtext);
-    //printf("Oh yeah, and the clock is at %li:%09li\n", (long) *sharedSecs, (long) *sharedNS);
+    //Loop until OSS termination or endProcess() termination
+    while (1)
+    {
+        //Wait to receive messages
+        if (msgrcv(msqid, &buf, sizeof(buf.mtext), i + 1, 0) == -1) {
+            strcpy(report, ": C-msgrcv");
+            message = strcat(title, report);
+            perror(message);
+            return 1;
+        }
 
-    //Make message
-    char msgToSnd[3];
-    sprintf(msgToSnd,"%i", i + 1);
-    buf.mtype = 33;
-    strcpy(buf.mtext, msgToSnd);
+        // Start/reset in-CPU time
+        interTImeNS = ((*sharedSecs * BILLION) + *sharedNS);
 
-    //Send message
-    if (msgsnd(msqid, &buf, strlen(buf.mtext) + 1, 0) == -1) {
-        strcpy(report, ": msgsnd");
-        message = strcat(title, report);
-        perror(message);
-        return 1;
+        //If already Blocked, notify OSS and go back to start until Block timer ends (and add to Total time)
+        if (blockedCheck == 1) {
+            if (blockTimerEnd > ((*sharedSecs * BILLION) + *sharedNS)) {
+                // Send Blocked message
+                char msgToSnd[3];
+                sprintf(msgToSnd, "%i", i + 1);
+                buf.mtype = 34;
+                strcpy(buf.mtext, msgToSnd);
+
+                if (msgsnd(msqid, &buf, strlen(buf.mtext) + 1, 0) == -1) {
+                    strcpy(report, ": msgsnd");
+                    message = strcat(title, report);
+                    perror(message);
+                    return 1;
+                }
+
+                procCtl->ctrlTbl[i].totalTimeInSystem += ((*sharedSecs * BILLION) + *sharedNS) - (((initialSharedSecs * BILLION) + initialSharedNS));
+                continue;
+            } else {
+                blockedCheck = 0;
+            }
+        }
+
+        //Check for termination
+        if ((rand() % 100) < CHANCE_TO_TERMINATE) {
+            terminateCheck = 1;
+        }
+
+        //Check for I/O block
+        if ((rand() % 100) < BLOCK_CHANCE) {
+            blockedCheck = 1;
+        }
+
+        //If terminating, use random amount of quantum first
+        if (terminateCheck == 1) {
+            //Spin
+            while ((((*sharedSecs * BILLION) + *sharedNS) - (((initialSharedSecs * BILLION) + initialSharedNS))) < (rand() % QUANTUM)) {}
+
+            //Log time (caused seg fault)
+            // procCtl->ctrlTbl[i].totalCPUTimeUsed += interTImeNS - (((initialSharedSecs * BILLION) + initialSharedNS));
+            // procCtl->ctrlTbl[i].totalTimeInSystem += ((*sharedSecs * BILLION) + *sharedNS) - (((initialSharedSecs * BILLION) + initialSharedNS));
+
+            //Exit
+            endProcess(buf, msqid, i);
+        }
+
+        // If getting blocked, wait for an event that lasts a random number of seconds
+        if (blockedCheck == 1) {
+            // Generate random values for r.s
+            r = rand() % 6;
+            s = rand() % 1001;
+            p = (rand() % 99) + 1;
+            p = p / 100;
+
+            blockTimerNS = (r * BILLION) + (s / 10000);
+
+            //For "3 indicates that the process gets preempted after using p of its assigned quantum" from project specs (???)
+            if (r == 3) {
+                //Spin for designated percentage of time quantum
+                while ((((*sharedSecs * BILLION) + *sharedNS) - (((initialSharedSecs * BILLION) + initialSharedNS))) < (p * QUANTUM)) {}
+                
+                //Log time (caused seg fault)
+                // procCtl->ctrlTbl[i].totalCPUTimeUsed += interTImeNS - (((initialSharedSecs * BILLION) + initialSharedNS));
+                // procCtl->ctrlTbl[i].totalTimeInSystem += ((*sharedSecs * BILLION) + *sharedNS) - (((initialSharedSecs * BILLION) + initialSharedNS));
+                continue;
+            } else {
+                blockTimerEnd = blockTimerNS + ((*sharedSecs * BILLION) + *sharedNS);
+            }
+
+            // Send Blocked message
+            char msgToSnd[3];
+            sprintf(msgToSnd, "%i", i + 1);
+            buf.mtype = 34;
+            strcpy(buf.mtext, msgToSnd);
+
+            if (msgsnd(msqid, &buf, strlen(buf.mtext) + 1, 0) == -1) {
+                strcpy(report, ": msgsnd");
+                message = strcat(title, report);
+                perror(message);
+                return 1;
+            }
+        } else {
+            //If all else fails, simply spin for whole quantum
+            while ((((*sharedSecs * BILLION) + *sharedNS) - (((initialSharedSecs * BILLION) + initialSharedNS))) < QUANTUM) {}
+        }
+
+        //Log time
+        procCtl->ctrlTbl[i].totalCPUTimeUsed += interTImeNS - (((initialSharedSecs * BILLION) + initialSharedNS));
+        procCtl->ctrlTbl[i].totalTimeInSystem += ((*sharedSecs * BILLION) + *sharedNS) - (((initialSharedSecs * BILLION) + initialSharedNS));
     }
 
     /**********************************************************************************
@@ -154,28 +278,6 @@ int main(int argc, char *argv[])
     End doing things here
 
     ***********************************************************************************/
-
-    //Detach shared memory
-    if (shmdt(sharedNS) == -1) {
-        strcpy(report, ": shmdtNS");
-        message = strcat(title, report);
-        perror(message);
-        return 1;
-    }
-
-    if (shmdt(sharedSecs) == -1) {
-        strcpy(report, ": shmdtSecs");
-        message = strcat(title, report);
-        perror(message);
-        return 1;
-    }
-
-    if (shmdt(procCtl) == -1) {
-        strcpy(report, ": shmdtPDT");
-        message = strcat(title, report);
-        perror(message);
-        return 1;
-    }
 
     return 0;
 }
